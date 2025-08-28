@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Render Proxy Server for UniSync
-This server runs on Render and forwards requests to your local cloudflared tunnel
+Render Redirect Server for UniSync
+This server runs on Render and redirects users directly to your cloudflared tunnel
 """
 
 import os
 import requests
-from flask import Flask, request, Response, redirect, url_for
+from flask import Flask, request, redirect, jsonify
 import logging
 from datetime import datetime
 
@@ -24,109 +24,23 @@ RENDER_PORT = int(os.environ.get('PORT', 10000))
 current_tunnel_url = CLOUDFLARED_TUNNEL_URL
 tunnel_update_time = None
 
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def proxy(path):
-    """Proxy all requests to the cloudflared tunnel"""
-    try:
-        # Construct the full URL for the cloudflared tunnel
-        target_url = f"{current_tunnel_url.rstrip('/')}/{path}"
-        
-        # Get query parameters
-        query_string = request.query_string.decode('utf-8')
-        if query_string:
-            target_url += f"?{query_string}"
-        
-        logger.info(f"Proxying request: {request.method} {request.path} -> {target_url}")
-        logger.info(f"Content-Type: {request.content_type}")
-        logger.info(f"Headers: {dict(request.headers)}")
-        logger.info(f"Data length: {len(request.get_data()) if request.get_data() else 0}")
-        
-        # Forward the request to the cloudflared tunnel
-        # Prepare headers (remove problematic ones)
-        headers = dict(request.headers)
-        headers_to_remove = ['Host', 'Content-Length', 'Transfer-Encoding']
-        for header in headers_to_remove:
-            if header in headers:
-                del headers[header]
-        
-        # Forward the request with proper data handling
-        if request.method == 'GET':
-            response = requests.get(target_url, headers=headers, timeout=30)
-        elif request.method == 'POST':
-            # Handle different content types properly
-            if request.content_type and 'application/json' in request.content_type:
-                # JSON data
-                response = requests.post(target_url, json=request.get_json(), headers=headers, timeout=30)
-            elif request.content_type and 'multipart/form-data' in request.content_type:
-                # Form data with files
-                response = requests.post(target_url, data=request.form, files=request.files, headers=headers, timeout=30)
-            else:
-                # Regular form data or raw data
-                response = requests.post(target_url, data=request.get_data(), headers=headers, timeout=30)
-        elif request.method == 'PUT':
-            response = requests.put(target_url, data=request.get_data(), headers=headers, timeout=30)
-        elif request.method == 'DELETE':
-            response = requests.delete(target_url, headers=headers, timeout=30)
-        else:
-            # For other methods, try to forward with data
-            response = requests.request(
-                method=request.method,
-                url=target_url,
-                data=request.get_data(),
-                headers=headers,
-                timeout=30
-            )
-        
-        # Create response with the same status code and headers
-        proxy_response = Response(
-            response.content,
-            status=response.status_code,
-            headers=dict(response.headers)
-        )
-        
-        # Remove problematic headers that might cause issues
-        if 'Transfer-Encoding' in proxy_response.headers:
-            del proxy_response.headers['Transfer-Encoding']
-        if 'Content-Encoding' in proxy_response.headers:
-            del proxy_response.headers['Content-Encoding']
-            
-        return proxy_response
-        
-    except requests.exceptions.ConnectionError:
-        logger.error(f"Connection error to cloudflared tunnel: {CLOUDFLARED_TUNNEL_URL}")
-        return Response(
-            f"Cloudflared tunnel is not accessible at {current_tunnel_url}. Please ensure your local app is running and cloudflared tunnel is active.",
-            status=503,
-            content_type='text/plain'
-        )
-    except requests.exceptions.Timeout:
-        logger.error(f"Timeout error to cloudflared tunnel: {CLOUDFLARED_TUNNEL_URL}")
-        return Response(
-            f"Request timeout. The cloudflared tunnel at {current_tunnel_url} is taking too long to respond.",
-            status=504,
-            content_type='text/plain'
-        )
-    except Exception as e:
-        logger.error(f"Proxy error: {str(e)}")
-        return Response(
-            f"Proxy error: {str(e)}",
-            status=500,
-            content_type='text/plain'
-        )
+@app.route('/')
+def home():
+    """Redirect to the cloudflared tunnel"""
+    logger.info(f"Redirecting user to: {current_tunnel_url}")
+    return redirect(current_tunnel_url, code=302)
 
-@app.route('/health')
-def health_check():
-    """Health check endpoint for Render"""
-    try:
-        # Try to connect to the cloudflared tunnel
-        response = requests.get(CLOUDFLARED_TUNNEL_URL, timeout=5)
-        if response.status_code == 200:
-            return {"status": "healthy", "tunnel": "connected"}, 200
-        else:
-            return {"status": "unhealthy", "tunnel": "responding_with_error"}, 503
-    except:
-        return {"status": "unhealthy", "tunnel": "not_accessible"}, 503
+@app.route('/<path:path>')
+def redirect_all(path):
+    """Redirect all other paths to the cloudflared tunnel"""
+    target_url = f"{current_tunnel_url.rstrip('/')}/{path}"
+    
+    # Preserve query parameters
+    if request.query_string:
+        target_url += f"?{request.query_string.decode('utf-8')}"
+    
+    logger.info(f"Redirecting {request.method} {request.path} to: {target_url}")
+    return redirect(target_url, code=302)
 
 @app.route('/tunnel_update', methods=['POST'])
 def tunnel_update():
@@ -165,17 +79,31 @@ def tunnel_update():
 
 @app.route('/status')
 def status():
-    """Status endpoint to check the proxy configuration"""
+    """Status endpoint to check the redirect configuration"""
     return {
-        "proxy_status": "running",
+        "redirect_status": "running",
         "original_tunnel_url": CLOUDFLARED_TUNNEL_URL,
         "current_tunnel_url": current_tunnel_url,
         "tunnel_updated_at": tunnel_update_time.isoformat() if tunnel_update_time else None,
         "render_port": RENDER_PORT,
-        "environment": os.environ.get('FLASK_ENV', 'production')
+        "environment": os.environ.get('FLASK_ENV', 'production'),
+        "mode": "redirect"
     }
 
+@app.route('/health')
+def health_check():
+    """Health check endpoint for Render"""
+    try:
+        # Try to connect to the cloudflared tunnel
+        response = requests.get(current_tunnel_url, timeout=5)
+        if response.status_code == 200:
+            return {"status": "healthy", "tunnel": "connected"}, 200
+        else:
+            return {"status": "unhealthy", "tunnel": "responding_with_error"}, 503
+    except:
+        return {"status": "unhealthy", "tunnel": "not_accessible"}, 503
+
 if __name__ == '__main__':
-    logger.info(f"Starting Render Proxy Server on port {RENDER_PORT}")
-    logger.info(f"Proxying to cloudflared tunnel: {CLOUDFLARED_TUNNEL_URL}")
+    logger.info(f"Starting Render Redirect Server on port {RENDER_PORT}")
+    logger.info(f"Redirecting to cloudflared tunnel: {CLOUDFLARED_TUNNEL_URL}")
     app.run(host='0.0.0.0', port=RENDER_PORT, debug=False)
