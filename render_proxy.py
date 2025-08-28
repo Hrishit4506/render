@@ -8,6 +8,7 @@ import os
 import requests
 from flask import Flask, request, Response, redirect, url_for
 import logging
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -19,13 +20,17 @@ app = Flask(__name__)
 CLOUDFLARED_TUNNEL_URL = os.environ.get('CLOUDFLARED_TUNNEL_URL', 'http://localhost:5000')
 RENDER_PORT = int(os.environ.get('PORT', 10000))
 
+# Store for dynamic tunnel updates
+current_tunnel_url = CLOUDFLARED_TUNNEL_URL
+tunnel_update_time = None
+
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def proxy(path):
     """Proxy all requests to the cloudflared tunnel"""
     try:
         # Construct the full URL for the cloudflared tunnel
-        target_url = f"{CLOUDFLARED_TUNNEL_URL.rstrip('/')}/{path}"
+        target_url = f"{current_tunnel_url.rstrip('/')}/{path}"
         
         # Get query parameters
         query_string = request.query_string.decode('utf-8')
@@ -71,14 +76,14 @@ def proxy(path):
     except requests.exceptions.ConnectionError:
         logger.error(f"Connection error to cloudflared tunnel: {CLOUDFLARED_TUNNEL_URL}")
         return Response(
-            "Cloudflared tunnel is not accessible. Please ensure your local app is running and cloudflared tunnel is active.",
+            f"Cloudflared tunnel is not accessible at {current_tunnel_url}. Please ensure your local app is running and cloudflared tunnel is active.",
             status=503,
             content_type='text/plain'
         )
     except requests.exceptions.Timeout:
         logger.error(f"Timeout error to cloudflared tunnel: {CLOUDFLARED_TUNNEL_URL}")
         return Response(
-            "Request timeout. The cloudflared tunnel is taking too long to respond.",
+            f"Request timeout. The cloudflared tunnel at {current_tunnel_url} is taking too long to respond.",
             status=504,
             content_type='text/plain'
         )
@@ -103,12 +108,49 @@ def health_check():
     except:
         return {"status": "unhealthy", "tunnel": "not_accessible"}, 503
 
+@app.route('/tunnel_update', methods=['POST'])
+def tunnel_update():
+    """Receive tunnel URL updates from local app"""
+    global current_tunnel_url, tunnel_update_time
+    
+    try:
+        data = request.get_json()
+        
+        if not data or 'tunnel_url' not in data:
+            return {"error": "Missing tunnel_url in request"}, 400
+        
+        new_tunnel_url = data['tunnel_url']
+        source = data.get('source', 'unknown')
+        timestamp = data.get('timestamp', datetime.now().isoformat())
+        
+        # Update the tunnel URL
+        old_url = current_tunnel_url
+        current_tunnel_url = new_tunnel_url
+        tunnel_update_time = datetime.now()
+        
+        logger.info(f"Tunnel URL updated from {old_url} to {new_tunnel_url} by {source}")
+        
+        return {
+            "status": "success",
+            "message": "Tunnel URL updated successfully",
+            "old_url": old_url,
+            "new_url": new_tunnel_url,
+            "updated_at": tunnel_update_time.isoformat(),
+            "source": source
+        }, 200
+        
+    except Exception as e:
+        logger.error(f"Error updating tunnel URL: {e}")
+        return {"error": f"Failed to update tunnel URL: {str(e)}"}, 500
+
 @app.route('/status')
 def status():
     """Status endpoint to check the proxy configuration"""
     return {
         "proxy_status": "running",
-        "cloudflared_tunnel_url": CLOUDFLARED_TUNNEL_URL,
+        "original_tunnel_url": CLOUDFLARED_TUNNEL_URL,
+        "current_tunnel_url": current_tunnel_url,
+        "tunnel_updated_at": tunnel_update_time.isoformat() if tunnel_update_time else None,
         "render_port": RENDER_PORT,
         "environment": os.environ.get('FLASK_ENV', 'production')
     }
