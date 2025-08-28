@@ -38,23 +38,43 @@ def proxy(path):
             target_url += f"?{query_string}"
         
         logger.info(f"Proxying request: {request.method} {request.path} -> {target_url}")
+        logger.info(f"Content-Type: {request.content_type}")
+        logger.info(f"Headers: {dict(request.headers)}")
+        logger.info(f"Data length: {len(request.get_data()) if request.get_data() else 0}")
         
         # Forward the request to the cloudflared tunnel
+        # Prepare headers (remove problematic ones)
+        headers = dict(request.headers)
+        headers_to_remove = ['Host', 'Content-Length', 'Transfer-Encoding']
+        for header in headers_to_remove:
+            if header in headers:
+                del headers[header]
+        
+        # Forward the request with proper data handling
         if request.method == 'GET':
-            response = requests.get(target_url, timeout=30)
+            response = requests.get(target_url, headers=headers, timeout=30)
         elif request.method == 'POST':
-            response = requests.post(target_url, data=request.form, files=request.files, timeout=30)
+            # Handle different content types properly
+            if request.content_type and 'application/json' in request.content_type:
+                # JSON data
+                response = requests.post(target_url, json=request.get_json(), headers=headers, timeout=30)
+            elif request.content_type and 'multipart/form-data' in request.content_type:
+                # Form data with files
+                response = requests.post(target_url, data=request.form, files=request.files, headers=headers, timeout=30)
+            else:
+                # Regular form data or raw data
+                response = requests.post(target_url, data=request.get_data(), headers=headers, timeout=30)
         elif request.method == 'PUT':
-            response = requests.put(target_url, data=request.form, timeout=30)
+            response = requests.put(target_url, data=request.get_data(), headers=headers, timeout=30)
         elif request.method == 'DELETE':
-            response = requests.delete(target_url, timeout=30)
+            response = requests.delete(target_url, headers=headers, timeout=30)
         else:
             # For other methods, try to forward with data
             response = requests.request(
                 method=request.method,
                 url=target_url,
                 data=request.get_data(),
-                headers=dict(request.headers),
+                headers=headers,
                 timeout=30
             )
         
